@@ -1,0 +1,298 @@
+<?php
+/*
+Plugin Name:	Grindless SiteLink
+Plugin URI:		https://grindless.com
+Description:	A collection of useful utilities for Grindless clients
+Version:		1.3
+Author:			Grindless LLC.
+Author URI:		mailto:admin@grindless.com
+*/
+
+if (!defined('ABSPATH')) die; // Don't allow direct loading
+
+add_action('plugins_loaded', array('GrindlessSiteLink', 'init'), 10);
+register_activation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_activate'));
+register_deactivation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_deactivate'));
+
+class GrindlessSiteLink {
+	const version = '1.3';
+	public static $instance = null;
+	public static $plugin_path;				// PHP friendly path to this plugin
+	public static $plugin_url;				// browser friendly URL to this plugin's directory
+	private static $glutil_debug;
+	
+	// runs when the plugin is activated in WP
+	public static function plugin_activate() {
+		if (in_array('the-events-calendar/the-events-calendar.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+			if ( ! wp_next_scheduled( 'grnd_events_cron_action' ) ) {
+				$grindless_options = get_option('grindless_options');
+				$schedule = isset($grindless_options['events_cron_schedule']) ? $grindless_options['events_cron_schedule'] : 'hourly';
+				if (empty($schedule)) {
+					$schedule = 'hourly';
+				}
+			
+				$result = wp_schedule_event( time(), $schedule, 'grnd_events_cron_action');
+				if (is_wp_error($result)) {
+					deactivate_plugins(plugin_basename( __FILE__ ));
+					wp_die('Error registering sync cron action.');
+				}
+			}
+		}
+	}
+	
+	// runs when the plugin is deactivated in WP
+	public static function plugin_deactivate() {
+		if (wp_next_scheduled('grnd_events_cron_action')) {
+			wp_clear_scheduled_hook('grnd_events_cron_action');
+		}
+	}
+	
+	// runs each time WP loads (fires relatively early)
+	public static function init() {
+		null === self::$instance AND self::$instance = new self;
+		return self::$instance;
+	}
+	
+	// initialize plugin
+	public function __construct() {
+		self::$plugin_path = WP_PLUGIN_DIR . '/' . basename(dirname(__FILE__)) . '/';
+		self::$plugin_url = WP_PLUGIN_URL . '/' . basename(dirname(__FILE__)) . '/';
+		
+		self::$glutil_debug = (isset($_GET['glutil_debug']) && current_user_can('manage_options')) ? $_GET['glutil_debug'] : false;
+		
+		// load POS API class
+		if (!class_exists('GrindlessPOS')) {
+			require_once('includes/grindless-pos-api.php');
+		}
+		
+		// load Tribe Events functions (events importing, etc)
+		if (!class_exists('GrindlessTribeEvents') && class_exists('Tribe__Events__Main')) {
+			require_once('includes/tribe-events-functions.php');
+			$GrindlessTribeEvents = new GrindlessTribeEvents();
+		}
+
+		if ( in_array( 'elementor/elementor.php', apply_filters( 'active_plugins', get_option( 'active_plugins' ) ) ) ) {
+			add_action( 'elementor_pro/forms/actions/register', array($this, 'elementor_register_reservations_form_action' ) );
+		}
+
+		if (is_admin()) {
+			// setup a Grindless Settings page
+			require_once('includes/wp-admin-settings.php');
+			
+			// add in Grindless-branded admin theme
+			add_action('admin_init', array($this, 'additional_admin_color_schemes'));
+		} else {
+			add_filter( 'template_include', array($this, 'template_include') );
+		}
+
+		add_action('wp_insert_post', array($this, 'status_post_publish'), 10, 3);
+		add_shortcode('system_status', array($this, 'status_sc_output'));
+	}
+	
+	// add custom wp-admin theme
+	function additional_admin_color_schemes() {
+		wp_admin_css_color(
+			'grindless',
+			'Grindless',
+			self::$plugin_url . '/assets/css/admin-colors-grindless.css',
+			array('#300947', '#450d65', '#7d5694', '#f8d42f'),
+			array('base' => '#e5f8ff', 'focus' => '#fff', 'current' => '#fff')
+		);
+	}
+
+	public function template_include($template) {
+		if (is_page('sandbox')) {
+			$template = self::$plugin_path . '/templates/page-sandbox.php';
+		}
+
+		return $template;
+	}
+
+	public static function elementor_register_reservations_form_action($form_actions_registrar) {
+		include_once('includes/elementor-form-action-reservation.php' );
+		$form_actions_registrar->register( new \Reservations_Action_After_Submit() );
+	}
+
+	public static function status_collect_recipients() {
+		global $wpdb;
+
+		$recipients = array();
+
+		$cutoff = $datetime = date('Y-m-d H:i:s', strtotime('-24 hours'));
+
+		$results = $wpdb->get_results(
+			"SELECT val.submission_id,val.key,val.value FROM {$wpdb->prefix}e_submissions_values val 
+			JOIN {$wpdb->prefix}e_submissions sub on sub.id=val.submission_id 
+			WHERE sub.form_name = 'Status Notify'
+			AND sub.created_at_gmt >= '{$cutoff}'
+			"
+		);
+
+		if (!count($results)) {
+			return array();
+		}
+
+		// format the results
+		foreach($results as $result) {
+			$recipients[$result->submission_id][$result->key] = $result->value;
+		}
+
+		return $recipients;
+	}
+
+	public static function status_send_notifications($post, $delivery = 'all') {
+		$results = array();
+
+		$recipients = self::status_collect_recipients();
+
+		// emails
+		$recip_email = array_column($recipients, 'email');
+		if (count($recip_email)) {
+			$recip_email = array_unique($recip_email);
+
+			$subject = 'New Status Alert: ' . get_the_title($post);
+			$message_email = '<h1>System Status Alert</h1><br>';
+			$message_email .= '<p>You are receiving this message because you have subscribed to receive notifications about system outages and status messages.</p>';
+			$message_email .= '<p>A new status alert message has been posted by our team. The contents of this alert are as follows:</p>';
+			$message_email .= get_the_content(null, true, $post);
+			$message_email .= '<p>For more info and to read past alerts, visit the status page at <a href="https://grindless.com/status">grindless.com/status</a>.</p>';
+			//error_log('Email recipients: ' . print_r($recip_email, true));
+			$results['email'] = self::status_send_email($recip_email, $subject, $message_email);
+		}
+
+		// SMS texts
+		$recip_phone = array_column($recipients, 'phone');
+		if (count($recip_phone)) {
+			$recip_phone = array_unique($recip_phone);
+			$message_sms = 'New Grindless Status Alert: ';
+			$message_sms .= get_the_excerpt($post);
+			$message_sms .= ' | More: https://grindless.com/status';
+			$results['sms'] = self::status_send_sms($recip_phone, $message_sms);
+		}
+
+		return $results;
+	}
+
+	public static function status_send_email($email_recipients, $subject, $message) {
+		foreach($email_recipients as $email_address) {
+			$result = wp_mail($email_address, $subject, $message);
+		}
+	}
+
+	public static function status_send_sms($sms_recipients, $message) {
+		require_once(__DIR__ . '/lib/Twilio/autoload.php');
+
+		$sender = null;
+		$sid = null;
+		$token = null;
+		$twilio = new Twilio\Rest\Client($sid, $token);
+
+		foreach ($sms_recipients as $phone_number) {
+			$twilio->messages->create(
+				$phone_number,
+				[
+					'from' => $sender,
+					'body' => $message
+				]
+			);
+		}
+	}
+
+	public static function status_post_publish($post_id, $post, $update) {
+		if ( $post->post_type !== 'post' || $post->post_status !== 'publish' || !in_category('status-alerts', $post) ) {
+			return;
+		}
+
+		// make sure we are not somehow dealing with old posts
+		if (strtotime(get_the_date('', $post)) < strtotime('-24 hours')) {
+			return;
+		}
+		
+		// make sure we have not already sent notifications for this post
+		$has_sent = get_post_meta($post_id, 'alerts_sent', true);
+		if (!empty($has_sent) || $has_sent == 'false') {
+			return;
+		}
+
+		// send notifications
+		self::status_send_notifications($post, 'all');
+
+		update_post_meta($post_id, 'alerts_sent', 'true' );
+	}
+
+	public static function status_sc_output( $atts ){
+		$args = shortcode_atts( array(
+			'foo' => 'something',
+		), $atts );
+
+		// reminder: anything echoed here will show up out of place
+		
+		// wrap output in output buffer
+		ob_start();
+
+		$response = GrindlessPOS::status_check();
+
+		$response_code = wp_remote_retrieve_response_code($response);
+
+		$force_fail = isset($_GET['forcefail']);
+
+		if ($response_code !== 200 || $force_fail == true) {
+			if ( $template = get_page_by_path( 'status-fail', 'OBJECT', 'elementor_library' ) ){	
+				$shortcode = ' [elementor-template id="'.$template->ID.'"] ';
+				echo do_shortcode( $shortcode );
+			} else {
+				echo '<h3>Outage Detected</h3>';
+				echo '<p>An outage has been detected. Our development team has been alerted to the issue.</p>';
+			}
+		} else {
+			if ( $template = get_page_by_path( 'status-pass', 'OBJECT', 'elementor_library' ) ){	
+				$shortcode = ' [elementor-template id="'.$template->ID.'"] ';
+				echo do_shortcode( $shortcode );
+			} else {
+				echo '<h3>Systems Online</h3>';
+				echo '<p>The Point of Sale is online and operational.</p>';
+			}
+
+			echo '<div style="display: none;">';
+			$doc = new DOMDocument();
+			libxml_use_internal_errors(true);
+			$doc->loadHTML(wp_remote_retrieve_body($response));
+			libxml_clear_errors();
+
+			$pools = $doc->getElementById('lblPools');
+
+			$metrics = array();
+
+			$table = $doc->getElementById('grd');
+
+			if ($table) {
+				foreach ($table->getElementsByTagName('tr') as $row) {
+					$cols = $row->getElementsByTagName('td');
+					if ($cols->length >= 2) {
+						$key = sanitize_key($cols->item(0)->textContent);
+						$value = trim($cols->item(1)->textContent);
+						$metrics[$key] = $value;
+					}
+				}
+			}
+
+			
+			echo '<h3>Uptime</h3>';
+			if (isset($metrics['uptime'])) {
+				$uptime = $metrics['uptime'];
+				$start = new DateTime('now');
+				$end = new DateTime('now');
+				$end->sub(new DateInterval("PT{$uptime}S"));
+				$diff = $start->diff($end);
+				echo '<p>Time since last shutdown: ';
+				echo $diff->format('%a days, %h hours, %i minutes, %s seconds');
+				echo '</p>';
+			}
+			echo '<h3>Application Pools</h3>';
+			echo $pools->textContent;
+			echo '</div>';
+		}
+
+		return ob_get_clean();
+	}
+}
