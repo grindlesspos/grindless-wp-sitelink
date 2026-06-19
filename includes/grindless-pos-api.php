@@ -36,13 +36,19 @@ class GrindlessPOS {
 		$cache_key = 'posremote_' . md5($url);
 		$posapidebug['url'] = $url;
 		$posapidebug['cache_key'] = $cache_key;
-		
+
 		$wp_request_args = wp_parse_args($wp_request_args, array(
 			'timeout'	=> 10,
 			'headers'	=> array(
 				'Content-Type: application/json'
 			)
 		));
+		
+		// /v1 endpoints need token where vanilla (/api) endpoints do not
+		// include token regardless since it doesnt hurt to always send it
+		if ($auth_key = GrindlessPOS::get_api_authorization()) {
+			$wp_request_args['headers']['Authorization'] = 'Bearer ' . $auth_key;
+		}
 		
 		if (isset($_REQUEST['clearposcache'])) {
 			$cache = -1;
@@ -336,7 +342,7 @@ class GrindlessPOS {
 		$fallback_expiration = 3 * DAY_IN_SECONDS;
 		
 		$payload = array(
-			'orgBillingID' => 0, // changed 04-21-2026
+			'OrgBillingID' => 0, // changed 04-21-2026
 			'Secret' => '',
 			'Access' => ''
 		);
@@ -346,7 +352,7 @@ class GrindlessPOS {
 		// get the stored billing org billing ID (which is different from the OrgID)
 		$partition_id = $grindless_options['partition_id'];
 		if ($partition_id) {
-			$payload['orgBillingID'] = $partition_id;
+			$payload['OrgBillingID'] = intval($partition_id);
 		}
 		
 		// get the secret key
@@ -429,7 +435,10 @@ class GrindlessPOS {
 			8 => 'ProductBrowse',
 			16 => 'Users',
 			32 => 'Reservations',
-			64 => 'Timer'
+			64 => 'Timer',
+			256 => 'Events',
+			512 => 'Customers',
+			1024 => 'CustomerService'
 		);
 		
 		// general is needed for things like getting store config and using customer support API, plus others.
@@ -447,6 +456,7 @@ class GrindlessPOS {
 		
 		// check to see if site is using events calendar. If so, add this to the access level
 		if(in_array('the-events-calendar/the-events-calendar.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+			$access_privs[] = 'Events';
 			$access_privs[] = 'Reservations';
 		}
 		

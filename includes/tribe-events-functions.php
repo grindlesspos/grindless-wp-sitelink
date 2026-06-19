@@ -31,7 +31,7 @@ class GrindlessTribeEvents {
 		add_action('admin_footer', array($this, 'media_selector_print_scripts'));
 		/* END default image */
 		
-		if(in_array('grindless-shop/grindless-shop.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+		if(in_array('grindless-wp-sitelink/grindless-wp-sitelink.php', apply_filters('active_plugins', get_option('active_plugins')))) {
 			add_action('tribe_events_single_event_after_the_content', array($this, 'add_tickets_link'));
 		}
 	}

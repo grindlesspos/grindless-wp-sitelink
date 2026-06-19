@@ -79,7 +79,7 @@ class GrindlessSettings {
 			'grindless_settings_setting_section' // section
 		);
 
-		if (isset($_GET['addcap'])) {
+		if (isset($_GET['page']) && $_GET['page'] === 'grindless-settings' && isset($_GET['addcap'])) {
 			$cur_user = get_user_by('ID', get_current_user_id());
 			 if (!$cur_user->has_cap('grindless_dev')) {
 				$cur_user->add_cap('grindless_dev');
@@ -190,11 +190,19 @@ class GrindlessSettings {
 		$api_connected = $auth_key = false;
 		if (isset($this->grindless_options['api_secret']) && !empty($this->grindless_options['api_secret'])) {
 			$force_renew = isset($_GET['renew_auth']);
+
 			$auth_key = GrindlessPOS::get_api_authorization($force_renew);
+
 			if (isset($auth_key) && $auth_key !== false) {
 				$api_connected = true;
-				if ($force_renew) {
+				if ($force_renew === true && $api_connected === true) {
 					echo 'Public Auth Key successfully renewed.';
+
+					if (current_user_can('grindless_dev')) {
+						echo '<br><br>DEBUG: POS API<br>';
+						global $posapidebug;
+						var_dump($posapidebug);
+					}
 				}
 			}
 		}
