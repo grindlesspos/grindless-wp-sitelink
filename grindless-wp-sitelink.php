@@ -3,7 +3,7 @@
 Plugin Name:	Grindless SiteLink
 Plugin URI:		https://grindless.com
 Description:	A collection of useful utilities for Grindless clients
-Version:		1.3
+Version:		1.3.2
 Author:			Grindless LLC.
 Author URI:		mailto:admin@grindless.com
 */
@@ -15,7 +15,7 @@ register_activation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_activate')
 register_deactivation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_deactivate'));
 
 class GrindlessSiteLink {
-	const version = '1.3';
+	const version = '1.3.2';
 	public static $instance = null;
 	public static $plugin_path;				// PHP friendly path to this plugin
 	public static $plugin_url;				// browser friendly URL to this plugin's directory
