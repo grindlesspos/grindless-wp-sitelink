@@ -38,6 +38,16 @@ class GrindlessSiteLink {
 				}
 			}
 		}
+
+		// clear any cached API results
+		// if something broke and we fix it, stale results could delay fixes from being seen publicly
+		$wpdb->query(
+			"
+			DELETE FROM {$wpdb->options}
+			WHERE option_name LIKE '\_transient\_posremote\_%'
+			   OR option_name LIKE '\_transient\_timeout\_posremote\_%'
+			"
+		);
 	}
 	
 	// runs when the plugin is deactivated in WP

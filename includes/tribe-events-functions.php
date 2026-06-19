@@ -717,7 +717,14 @@ class GrindlessTribeEvents {
 		}
 
 		if (!is_array($tickets) || !count($tickets)) {
-			if (self::$debug) echo '[DEBUG] Info: No tickets for this event were returned from API.';
+			if (self::$debug) {
+				echo '[DEBUG] Info: No tickets for this event were returned from API. Dumping API request:<br><pre>';
+				global $posapidebug;
+				var_dump($posapidebug);
+				echo '</pre>';
+
+			}
+
 			return;
 		}
 		
