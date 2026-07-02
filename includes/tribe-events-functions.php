@@ -31,7 +31,7 @@ class GrindlessTribeEvents {
 		add_action('admin_footer', array($this, 'media_selector_print_scripts'));
 		/* END default image */
 		
-		if(in_array('grindless-wp-sitelink/grindless-wp-sitelink.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+		if(in_array('grindless-wp-quickshop/grindless-wp-quickshop.php', apply_filters('active_plugins', get_option('active_plugins')))) {
 			add_action('tribe_events_single_event_after_the_content', array($this, 'add_tickets_link'));
 		}
 	}
@@ -61,7 +61,7 @@ class GrindlessTribeEvents {
 		$cron_schedule_key = isset($grindless_options['events_cron_schedule']) ? $grindless_options['events_cron_schedule'] : null;
 		$cron_schedules = wp_get_schedules();
 		$cron_schedule = isset($cron_schedules[$cron_schedule_key]) ? $cron_schedules[$cron_schedule_key] : null;
-		$sync_interval = $sync_result['sync_interval'] = isset($cron_schedule) ? $cron_schedule['interval'] : HOUR_IN_SECONDS*24; // fallback to daily just in case
+		$sync_interval = $sync_result['sync_interval'] = isset($cron_schedule) ? $cron_schedule['interval'] : HOUR_IN_SECONDS * 24; // fallback to daily just in case
 		
 		// check how long it has been and if we should check events
 		$last_update_time = $nocache === true || isset($_REQUEST['nocache']) ? 0 : get_transient('grnd-events-lastcheck');
@@ -133,8 +133,11 @@ class GrindlessTribeEvents {
 		// should we only care about some events?
 		
 		// add / edit routine
+		if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Processing POS events...<br>';
 		foreach ($pos_events_list as $org_id => $pos_events) {
+			if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Processing events for OrgID ' . $org_id . '<br>';
 			foreach ($pos_events as $raw_event) {
+				if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Processing single event: ' . $raw_event->ID . '<br>';
 				$result = null;
 			
 				// check if this event already exists in WP
@@ -180,7 +183,8 @@ class GrindlessTribeEvents {
 		}
 
 		// begin delete routine
-		
+		if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Delete routine START.<br>';
+
 		// format POS events array
 		if (is_array($pos_events_list) && count($pos_events_list)) {
 			foreach ($pos_events_list as $org_id => $pos_events) {
@@ -190,8 +194,16 @@ class GrindlessTribeEvents {
 			}
 		}
 
+		if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Formatted ' . count($pos_events_tmp) . ' POS event(s) for delete routine.<br>';
+
 		// get a list of all events in our db (excludes custom events made in UI)
-		$existing_events = tribe_get_events(array('meta_key' => 'pos_guid'));
+
+		$tribe_query_args = array(
+			'meta_key'			=> 'pos_guid',
+			'posts_per_page'	=> -1
+		);
+		$existing_events = tribe_get_events($tribe_query_args);
+
 		if (is_array($existing_events) && count($existing_events)) {
 			foreach ($existing_events as $existing_event) {
 				$event_guid = get_post_meta($existing_event->ID, 'pos_guid', true);
@@ -200,10 +212,12 @@ class GrindlessTribeEvents {
 				$existing_events_tmp[$event_guid] = $existing_event->ID;
 			}
 
+			if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Formatted ' . count($existing_events_tmp) . ' existing Tribe(s).<br>';
+
 			// delete events in our db that no longer exist server side
 			if (is_array($existing_events_tmp) && count($existing_events_tmp)) {
 				$pos_only_events = array_diff_key($existing_events_tmp, $pos_events_tmp);
-
+				if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Found ' . count($pos_only_events) . ' events that only exist in POS.<br>';
 				foreach ($pos_only_events as $event_guid => $post_id) {
 					$delete_result = wp_delete_post($post_id, true); // true = skip the trash
 					if ($delete_result) {
@@ -211,9 +225,13 @@ class GrindlessTribeEvents {
 						$sync_result['deleted_count']++;
 					}
 				}
+				if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Deleted ' . $sync_result['deleted_count'] . ' events from Tribe list.<br>';
 			}
-		}		
+		} else {
+			if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Did not find any existing Tribe events. No deletions took place.<br>';
+		}
 
+		if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Delete routine END.<br>';
 		// end delete routine
 
 		
@@ -239,7 +257,7 @@ class GrindlessTribeEvents {
 	
 	public static function get_date_cutoff() {
 		return array(
-			'date_from' => date('m-d-Y', strtotime('-1 days')),
+			'date_from' => date('m-d-Y', strtotime('-3 weeks')),
 			'date_to' => date('m-d-Y', strtotime('+60 days'))
 		);
 	}
@@ -667,9 +685,22 @@ class GrindlessTribeEvents {
 		if (!isset($shop_page_id)) {
 			if (self::$debug) echo '[DEBUG] Info: Shop Page ID not set.<br>';
 			return;
+		} else {
+			$shop_url = get_permalink($shop_page_id);
 		}
 
 		$tickets = GrindlessPOS::get_event_tickets($org_id, $pos_guid, 15 * MINUTE_IN_SECONDS);
+
+		if (!is_array($tickets) || !count($tickets)) {
+			if (self::$debug) {
+				echo '[DEBUG] Info: No tickets for this event were returned from API. Dumping API request:<br><pre>';
+				global $posapidebug;
+				var_dump($posapidebug);
+				echo '</pre>';
+			}
+
+			return;
+		}
 
 		$event_start = tribe_get_start_date(get_the_ID(), false, 'U');
 		$event_start_midnight = $event_start - ($event_start % 86400);
@@ -682,7 +713,7 @@ class GrindlessTribeEvents {
 		if (self::$debug) echo '[DEBUG] Midnight this morning was: ' . date('Y-m-d H:i:s', $today_midnight) . '<br>';
 
 		foreach ($tickets as $i => $ticket) {
-			if (self::$debug) echo '[DEBUG] ## Processing ' . $ticket->TicketName . ' (' . $ticket->TicketType . ')...<br>';
+			if (self::$debug) echo '[DEBUG] ## Processing "' . $ticket->TicketName . '" (' . $ticket->TicketType . ')...<br>';
 
 			if ($ticket->TicketType == 'PRE') {
 				if (self::$debug) echo '[DEBUG] [PRESALE TICKET] Latest ticket can be sold: ' . date('Y-m-d H:i:s', $event_start_midnight) . '<br>';
@@ -698,7 +729,7 @@ class GrindlessTribeEvents {
 				// make sure we're only offering DAY-OF tickets the day of the actual Event
 				if (self::$debug) echo '[DEBUG] [DAY TICKET] Earliest ticket can be sold: ' . date('Y-m-d H:i:s', $event_start_midnight) . '<br>';
 				if (self::$debug) echo '[DEBUG] [DAY TICKET] Latest ticket can be sold: ' . date('Y-m-d H:i:s', $event_start) . '<br>';
-				if (($event_start_midnight == $today_midnight) && (!$event_start > $now)) {
+				if (($event_start_midnight == $today_midnight) && ($event_start > $now)) {
 					if (self::$debug) echo '[DEBUG] [DAY TICKET] Day of event and event has not passed. Checks passed.<br>';
 					// ticket is for today so can still be purchased. Show it.
 				} else {
@@ -715,20 +746,6 @@ class GrindlessTribeEvents {
 				}
 			}
 		}
-
-		if (!is_array($tickets) || !count($tickets)) {
-			if (self::$debug) {
-				echo '[DEBUG] Info: No tickets for this event were returned from API. Dumping API request:<br><pre>';
-				global $posapidebug;
-				var_dump($posapidebug);
-				echo '</pre>';
-
-			}
-
-			return;
-		}
-		
-		$shop_url = get_permalink($shop_page_id);
 
 		echo '<div class="grindless-shop-tickets">';
 

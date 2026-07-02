@@ -3,7 +3,7 @@
 Plugin Name:	Grindless SiteLink
 Plugin URI:		https://grindless.com
 Description:	A collection of useful utilities for Grindless clients
-Version:		1.3.2
+Version:		1.3.4
 Author:			Grindless LLC.
 Author URI:		mailto:admin@grindless.com
 */
@@ -15,7 +15,7 @@ register_activation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_activate')
 register_deactivation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_deactivate'));
 
 class GrindlessSiteLink {
-	const version = '1.3.2';
+	const version = '1.3.4';
 	public static $instance = null;
 	public static $plugin_path;				// PHP friendly path to this plugin
 	public static $plugin_url;				// browser friendly URL to this plugin's directory
@@ -41,6 +41,7 @@ class GrindlessSiteLink {
 
 		// clear any cached API results
 		// if something broke and we fix it, stale results could delay fixes from being seen publicly
+		global $wpdb;
 		$wpdb->query(
 			"
 			DELETE FROM {$wpdb->options}
@@ -124,6 +125,10 @@ class GrindlessSiteLink {
 	}
 
 	public static function status_collect_recipients() {
+		if ( !in_array( 'elementor/elementor.php', apply_filters( 'active_plugins', get_option( 'active_plugins' ) ) ) ) {
+			return array();
+		}
+
 		global $wpdb;
 
 		$recipients = array();
@@ -150,34 +155,44 @@ class GrindlessSiteLink {
 		return $recipients;
 	}
 
-	public static function status_send_notifications($post, $delivery = 'all') {
+	public static function status_send_notifications($post, $delivery = array('email', 'sms')) {
 		$results = array();
 
 		$recipients = self::status_collect_recipients();
 
-		// emails
-		$recip_email = array_column($recipients, 'email');
-		if (count($recip_email)) {
-			$recip_email = array_unique($recip_email);
-
-			$subject = 'New Status Alert: ' . get_the_title($post);
-			$message_email = '<h1>System Status Alert</h1><br>';
-			$message_email .= '<p>You are receiving this message because you have subscribed to receive notifications about system outages and status messages.</p>';
-			$message_email .= '<p>A new status alert message has been posted by our team. The contents of this alert are as follows:</p>';
-			$message_email .= get_the_content(null, true, $post);
-			$message_email .= '<p>For more info and to read past alerts, visit the status page at <a href="https://grindless.com/status">grindless.com/status</a>.</p>';
-			//error_log('Email recipients: ' . print_r($recip_email, true));
-			$results['email'] = self::status_send_email($recip_email, $subject, $message_email);
+		if (!$recipients) {
+			return $results;
 		}
 
-		// SMS texts
-		$recip_phone = array_column($recipients, 'phone');
-		if (count($recip_phone)) {
-			$recip_phone = array_unique($recip_phone);
-			$message_sms = 'New Grindless Status Alert: ';
-			$message_sms .= get_the_excerpt($post);
-			$message_sms .= ' | More: https://grindless.com/status';
-			$results['sms'] = self::status_send_sms($recip_phone, $message_sms);
+		if (in_array('email', $delivery)) {
+			// emails
+			$recip_email = array_column($recipients, 'email');
+			if (count($recip_email)) {
+				$recip_email = array_unique($recip_email);
+
+				$subject = 'New Status Alert: ' . get_the_title($post);
+				$message_email = '<h1>System Status Alert</h1><br>';
+				$message_email .= '<p>You are receiving this message because you have subscribed to receive notifications about system outages and status messages.</p>';
+				$message_email .= '<p>A new status alert message has been posted by our team. The contents of this alert are as follows:</p>';
+				$message_email .= get_the_content(null, true, $post);
+				$message_email .= '<p>For more info and to read past alerts, visit the status page at <a href="https://grindless.com/status">grindless.com/status</a>.</p>';
+				//error_log('Email recipients: ' . print_r($recip_email, true));
+				$results['email'] = self::status_send_email($recip_email, $subject, $message_email);
+			}
+		}
+
+		if (in_array('sms', $delivery) && file_exists(__DIR__ . '/lib/Twilio/autoload.php')) {
+			require_once(__DIR__ . '/lib/Twilio/autoload.php');
+
+			// SMS texts
+			$recip_phone = array_column($recipients, 'phone');
+			if (count($recip_phone)) {
+				$recip_phone = array_unique($recip_phone);
+				$message_sms = 'New Grindless Status Alert: ';
+				$message_sms .= get_the_excerpt($post);
+				$message_sms .= ' | More: https://grindless.com/status';
+				$results['sms'] = self::status_send_sms($recip_phone, $message_sms);
+			}
 		}
 
 		return $results;
@@ -190,8 +205,6 @@ class GrindlessSiteLink {
 	}
 
 	public static function status_send_sms($sms_recipients, $message) {
-		require_once(__DIR__ . '/lib/Twilio/autoload.php');
-
 		$sender = null;
 		$sid = null;
 		$token = null;
@@ -225,7 +238,7 @@ class GrindlessSiteLink {
 		}
 
 		// send notifications
-		self::status_send_notifications($post, 'all');
+		self::status_send_notifications($post);
 
 		update_post_meta($post_id, 'alerts_sent', 'true' );
 	}
