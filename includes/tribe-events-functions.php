@@ -7,7 +7,6 @@ class GrindlessTribeEvents {
 	
 	public function __construct() {
 		add_action('wp_ajax_gevents_sync', array($this, 'ajax_events_sync'));
-		add_action('wp_ajax_nopriv_gevents_sync', array($this, 'ajax_events_sync'));
 		add_action('grnd_events_cron_action', array($this, 'grnd_events_cron_func'));
 		
 		self::$debug = (isset($_GET['gdebug']) && current_user_can('manage_options')) ? $_GET['gdebug'] : false;
@@ -37,12 +36,36 @@ class GrindlessTribeEvents {
 	}
 	
 	public static function ajax_events_sync() {
-		$sync_result = self::events_sync();
-		
-		wp_send_json($sync_result);
+		if (!current_user_can('manage_options')) {
+			wp_send_json_error(array('message' => 'Permission denied.'), 403);
+		}
+
+		check_ajax_referer('grnd_events_sync');
+
+		$sync_result = self::events_sync(false, true);
+		wp_send_json_success($sync_result);
 	}
-	
+
+	// prevent multiple event syncs from running at the same time
 	public static function events_sync($dryrun = false, $nocache = false) {
+		if (get_transient('grnd-events-sync-lock')) {
+			return array(
+				'did_sync' => false,
+				'message' => 'Another event sync is already running.',
+			);
+		}
+
+		set_transient('grnd-events-sync-lock', 1, 15 * MINUTE_IN_SECONDS);
+
+		try {
+			return self::events_sync_process($dryrun, $nocache);
+		} finally {
+			delete_transient('grnd-events-sync-lock');
+		}
+	}
+
+	// perform the event sync after the lock has been acquired
+	private static function events_sync_process($dryrun = false, $nocache = false) {
 		$sync_result = array(
 			'did_sync' => false,
 			'last_update' => 0,
@@ -70,8 +93,7 @@ class GrindlessTribeEvents {
 		$earliest_sync = $sync_result['earliest_sync'] = ($last_update_time + $sync_interval);
 		
 		if (time() >= $earliest_sync) {
-			// going to check for events in a moment. Update lastcheck time to now
-			set_transient('grnd-events-lastcheck', time(), time() + $sync_interval);
+			// continue with the sync
 		} else {
 			// no need to update
 			if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Last sync occured at ' . $last_update_time . '. Update is not needed! Returning...<br>';
@@ -183,6 +205,8 @@ class GrindlessTribeEvents {
 		}
 
 		// begin delete routine
+		$pos_events_tmp = array();
+		$existing_events_tmp = array();
 		if (self::$debug) echo __METHOD__.'#'.__LINE__. ': Delete routine START.<br>';
 
 		// format POS events array
@@ -242,6 +266,9 @@ class GrindlessTribeEvents {
 		
 		if ($dryrun === true) {
 			$sync_result['message'] .= ' | dryrun! No records changed.';
+		} else {
+			// record the last completed sync check
+			set_transient('grnd-events-lastcheck', time(), $sync_interval);
 		}
 		
 		return $sync_result;
@@ -662,9 +689,25 @@ class GrindlessTribeEvents {
 	}
 	
 	public function grnd_events_cron_func() {
-		$events_updated = self::events_sync();
-		
-		return $events_updated;
+		if (!class_exists('Tribe__Events__Main')) {
+			$result = array(
+				'did_sync' => false,
+				'message' => 'The Events Calendar is not available.',
+			);
+		} else {
+			// cron already controls the sync interval, so bypass the manual throttle
+			$result = self::events_sync(false, true);
+		}
+
+		// save the result so it can be reviewed from the settings page
+		update_option(
+			'grnd_events_last_cron_result',
+			array(
+				'time' => time(),
+				'result' => $result,
+			),
+			false
+		);
 	}
 	
 	public function add_tickets_link() {
@@ -714,6 +757,12 @@ class GrindlessTribeEvents {
 
 		foreach ($tickets as $i => $ticket) {
 			if (self::$debug) echo '[DEBUG] ## Processing "' . $ticket->TicketName . '" (' . $ticket->TicketType . ')...<br>';
+
+			if (strpos($ticket->TicketName, '(ISO)')) {
+				if (self::$debug) echo '[DEBUG] Ticket is in-store only! Removing it from the list.<br>';
+				unset($tickets[$i]);
+				continue;
+			}
 
 			if ($ticket->TicketType == 'PRE') {
 				if (self::$debug) echo '[DEBUG] [PRESALE TICKET] Latest ticket can be sold: ' . date('Y-m-d H:i:s', $event_start_midnight) . '<br>';
@@ -834,7 +883,18 @@ class GrindlessTribeEvents {
 		print('<p class="description">Enter the amount of time that should pass before checking the POS for new events and running the sync routine. This relies on WordPress\'s <a href="https://developer.wordpress.org/plugins/cron/">WP Cron</a> feature.</p>');
 		printf('<p class="description">This feature requires <a href="%s">Venues</a> to be configured. Each Venue must have the correlating Organization ID set as meta data. The key for the meta data should be "org_id" and the value should be the actual Organization ID from the POS.</p>', admin_url('edit.php?post_type=tribe_venue'));
 		
-		$link = add_query_arg(array('action' => 'gevents_sync', 'nocache' => 'true'), admin_url('admin-ajax.php'));
-		printf('<p><a class="button" href="%s" target="_blank">Sync Events Now</a></p>', $link);
+		$link = add_query_arg(array('action' => 'gevents_sync'), admin_url('admin-ajax.php'));
+		$link = wp_nonce_url($link, 'grnd_events_sync');
+		printf('<p><a class="button" href="%s" target="_blank">Sync Events Now</a></p>', esc_url($link));
+
+		$last_cron = get_option('grnd_events_last_cron_result');
+		if (is_array($last_cron) && !empty($last_cron['time'])) {
+			$message = isset($last_cron['result']['message']) ? $last_cron['result']['message'] : 'No result message was recorded.';
+			printf(
+				'<p class="description">Last cron attempt: %s<br>Result: %s</p>',
+				esc_html(wp_date('Y-m-d H:i:s', intval($last_cron['time']))),
+				esc_html($message)
+			);
+		}
 	}
 }

@@ -3,19 +3,20 @@
 Plugin Name:	Grindless SiteLink
 Plugin URI:		https://grindless.com
 Description:	A collection of useful utilities for Grindless clients
-Version:		1.3.4
+Version:		1.3.5
 Author:			Grindless LLC.
 Author URI:		mailto:admin@grindless.com
 */
 
 if (!defined('ABSPATH')) die; // Don't allow direct loading
 
-add_action('plugins_loaded', array('GrindlessSiteLink', 'init'), 10);
+add_action('plugins_loaded', array('GrindlessSiteLink', 'init'), 20);
 register_activation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_activate'));
 register_deactivation_hook(__FILE__, array('GrindlessSiteLink', 'plugin_deactivate'));
 
 class GrindlessSiteLink {
-	const version = '1.3.4';
+	const version = '1.3.5';
+	const events_cron_hook = 'grnd_events_cron_action';
 	public static $instance = null;
 	public static $plugin_path;				// PHP friendly path to this plugin
 	public static $plugin_url;				// browser friendly URL to this plugin's directory
@@ -23,20 +24,13 @@ class GrindlessSiteLink {
 	
 	// runs when the plugin is activated in WP
 	public static function plugin_activate() {
-		if (in_array('the-events-calendar/the-events-calendar.php', apply_filters('active_plugins', get_option('active_plugins')))) {
-			if ( ! wp_next_scheduled( 'grnd_events_cron_action' ) ) {
-				$grindless_options = get_option('grindless_options');
-				$schedule = isset($grindless_options['events_cron_schedule']) ? $grindless_options['events_cron_schedule'] : 'hourly';
-				if (empty($schedule)) {
-					$schedule = 'hourly';
-				}
-			
-				$result = wp_schedule_event( time(), $schedule, 'grnd_events_cron_action');
-				if (is_wp_error($result)) {
-					deactivate_plugins(plugin_basename( __FILE__ ));
-					wp_die('Error registering sync cron action.');
-				}
-			}
+		$result = self::schedule_events_cron();
+
+		if (is_wp_error($result) || $result === false) {
+			deactivate_plugins(plugin_basename(__FILE__));
+
+			$message = is_wp_error($result) ? $result->get_error_message() : 'unknown scheduling error';
+			wp_die(esc_html('Error registering sync cron action: ' . $message));
 		}
 
 		// clear any cached API results
@@ -45,19 +39,65 @@ class GrindlessSiteLink {
 		$wpdb->query(
 			"
 			DELETE FROM {$wpdb->options}
-			WHERE option_name LIKE '\_transient\_posremote\_%'
-			   OR option_name LIKE '\_transient\_timeout\_posremote\_%'
+			WHERE option_name LIKE '\\_transient\\_posremote\\_%'
+			   OR option_name LIKE '\\_transient\\_timeout\\_posremote\\_%'
 			"
 		);
 	}
-	
+
 	// runs when the plugin is deactivated in WP
 	public static function plugin_deactivate() {
-		if (wp_next_scheduled('grnd_events_cron_action')) {
-			wp_clear_scheduled_hook('grnd_events_cron_action');
+		wp_clear_scheduled_hook(self::events_cron_hook);
+	}
+
+	// get the selected cron schedule or use the default
+	public static function get_events_cron_schedule($options = null) {
+		if (!is_array($options)) {
+			$options = get_option('grindless_options', array());
+		}
+
+		$schedule = !empty($options['events_cron_schedule']) ? sanitize_key($options['events_cron_schedule']) : 'hourly';
+		$schedules = wp_get_schedules();
+
+		return isset($schedules[$schedule]) ? $schedule : 'hourly';
+	}
+
+	// schedule the event sync if it is not already scheduled
+	public static function schedule_events_cron($options = null) {
+		if (wp_next_scheduled(self::events_cron_hook)) {
+			return true;
+		}
+
+		return wp_schedule_event(
+			time() + MINUTE_IN_SECONDS,
+			self::get_events_cron_schedule($options),
+			self::events_cron_hook,
+			array(),
+			true
+		);
+	}
+
+	// restore the cron event if it is ever removed
+	public static function ensure_events_cron() {
+		if (!wp_next_scheduled(self::events_cron_hook)) {
+			self::schedule_events_cron();
 		}
 	}
-	
+
+	// rebuild the cron event when its schedule changes
+	public static function options_updated($old_value, $value, $option) {
+		$old_schedule = self::get_events_cron_schedule(is_array($old_value) ? $old_value : array());
+		$new_schedule = self::get_events_cron_schedule(is_array($value) ? $value : array());
+
+		if ($old_schedule === $new_schedule) {
+			return;
+		}
+
+		wp_clear_scheduled_hook(self::events_cron_hook);
+		delete_transient('grnd-events-lastcheck');
+		self::schedule_events_cron($value);
+	}
+
 	// runs each time WP loads (fires relatively early)
 	public static function init() {
 		null === self::$instance AND self::$instance = new self;
@@ -73,14 +113,18 @@ class GrindlessSiteLink {
 		
 		// load POS API class
 		if (!class_exists('GrindlessPOS')) {
-			require_once('includes/grindless-pos-api.php');
+			require_once(__DIR__ . '/includes/grindless-pos-api.php');
 		}
 		
 		// load Tribe Events functions (events importing, etc)
-		if (!class_exists('GrindlessTribeEvents') && class_exists('Tribe__Events__Main')) {
-			require_once('includes/tribe-events-functions.php');
-			$GrindlessTribeEvents = new GrindlessTribeEvents();
+		if (!class_exists('GrindlessTribeEvents')) {
+			require_once(__DIR__ . '/includes/tribe-events-functions.php');
 		}
+		new GrindlessTribeEvents();
+
+		// keep the cron event available and update it when settings change
+		add_action('init', array(__CLASS__, 'ensure_events_cron'));
+		add_action('update_option_grindless_options', array(__CLASS__, 'options_updated'), 10, 3);
 
 		if ( in_array( 'elementor/elementor.php', apply_filters( 'active_plugins', get_option( 'active_plugins' ) ) ) ) {
 			add_action( 'elementor_pro/forms/actions/register', array($this, 'elementor_register_reservations_form_action' ) );
@@ -88,7 +132,7 @@ class GrindlessSiteLink {
 
 		if (is_admin()) {
 			// setup a Grindless Settings page
-			require_once('includes/wp-admin-settings.php');
+			require_once(__DIR__ . '/includes/wp-admin-settings.php');
 			
 			// add in Grindless-branded admin theme
 			add_action('admin_init', array($this, 'additional_admin_color_schemes'));
@@ -120,7 +164,7 @@ class GrindlessSiteLink {
 	}
 
 	public static function elementor_register_reservations_form_action($form_actions_registrar) {
-		include_once('includes/elementor-form-action-reservation.php' );
+		include_once(__DIR__ . '/includes/elementor-form-action-reservation.php' );
 		$form_actions_registrar->register( new \Reservations_Action_After_Submit() );
 	}
 
