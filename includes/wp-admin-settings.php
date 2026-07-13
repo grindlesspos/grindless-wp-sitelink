@@ -156,7 +156,29 @@ class GrindlessSettings {
 		if ( isset( $input['events_cron_schedule'] ) ) {
 			$sanitary_values['events_cron_schedule'] = sanitize_text_field( $input['events_cron_schedule'] );
 		}
-		
+
+		if ( isset( $input['events_days_past'] ) ) {
+			$days_past = intval($input['events_days_past']);
+			if ($days_past < 0) {
+				$days_past = 0;
+			} elseif ($days_past > 365) {
+				$days_past = 365;
+			}
+
+			$sanitary_values['events_days_past'] = $days_past;
+		}
+
+		if ( isset( $input['events_days_future'] ) ) {
+			$days_future = intval($input['events_days_future']);
+			if ($days_future < 1) {
+				$days_future = 1;
+			} elseif ($days_future > 365) {
+				$days_future = 365;
+			}
+
+			$sanitary_values['events_days_future'] = $days_future;
+		}
+
 		return $sanitary_values;
 	}
 

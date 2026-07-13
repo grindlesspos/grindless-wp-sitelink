@@ -238,9 +238,14 @@ class GrindlessTribeEvents {
 	}
 	
 	public static function get_date_cutoff() {
+		$grindless_options = get_option('grindless_options');
+
+		$days_past = isset($grindless_options['events_days_past']) ? intval($grindless_options['events_days_past']) : 1;
+		$days_future = isset($grindless_options['events_days_future']) ? intval($grindless_options['events_days_future']) : 60;
+
 		return array(
-			'date_from' => date('m-d-Y', strtotime('-1 days')),
-			'date_to' => date('m-d-Y', strtotime('+60 days'))
+			'date_from' => date('m-d-Y', strtotime('-' . $days_past . ' days')),
+			'date_to' => date('m-d-Y', strtotime('+' . $days_future . ' days'))
 		);
 	}
 	
@@ -795,6 +800,22 @@ class GrindlessTribeEvents {
 			'grindless-settings-admin', // page
 			'grindless_events_section' // section
 		);
+
+		add_settings_field(
+			'events_days_past', // id
+			'Sync Range - Days in the Past', // title
+			array( $this, 'settings_days_past_callback' ), // callback
+			'grindless-settings-admin', // page
+			'grindless_events_section' // section
+		);
+
+		add_settings_field(
+			'events_days_future', // id
+			'Sync Range - Days in the Future', // title
+			array( $this, 'settings_days_future_callback' ), // callback
+			'grindless-settings-admin', // page
+			'grindless_events_section' // section
+		);
 	}
 	
 	public function settings_info_html() {
@@ -819,5 +840,19 @@ class GrindlessTribeEvents {
 		
 		$link = add_query_arg(array('action' => 'gevents_sync', 'nocache' => 'true'), admin_url('admin-ajax.php'));
 		printf('<p><a class="button" href="%s" target="_blank">Sync Events Now</a></p>', $link);
+	}
+
+	public function settings_days_past_callback() {
+		$grindless_options = get_option('grindless_options');
+		$current = isset($grindless_options['events_days_past']) ? intval($grindless_options['events_days_past']) : 1;
+		printf('<input type="number" min="0" max="365" step="1" class="small-text" name="grindless_options[events_days_past]" id="events_days_past" value="%s" autocomplete="off">', esc_attr($current));
+		print('<p class="description">The number of days prior to today that should be included when querying the POS for events. Default is 1.</p>');
+	}
+
+	public function settings_days_future_callback() {
+		$grindless_options = get_option('grindless_options');
+		$current = isset($grindless_options['events_days_future']) ? intval($grindless_options['events_days_future']) : 60;
+		printf('<input type="number" min="1" max="365" step="1" class="small-text" name="grindless_options[events_days_future]" id="events_days_future" value="%s" autocomplete="off">', esc_attr($current));
+		print('<p class="description">The number of days beyond today that should be included when querying the POS for events. Default is 60.</p>');
 	}
 }
