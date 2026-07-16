@@ -131,33 +131,42 @@ class GrindlessTribeEvents {
 		// #TO-DO
 		// some kind of cutoff goes here...
 		// should we only care about some events?
-		
+
+		// get a list of all events in our db (excludes custom events made in UI), keyed by pos_guid => post_id.
+		// built once up front (single query) and reused by both the add/edit routine (existence checks) and the
+		// delete routine (diffing against what the POS returned), instead of querying once per POS event.
+		$existing_events_tmp = array();
+		$existing_events = tribe_get_events(array('meta_key' => 'pos_guid'));
+		if (is_array($existing_events) && count($existing_events)) {
+			foreach ($existing_events as $existing_event) {
+				$event_guid = get_post_meta($existing_event->ID, 'pos_guid', true);
+				if (!is_string($event_guid) or !strlen($event_guid)) continue;
+
+				$existing_events_tmp[$event_guid] = $existing_event->ID;
+			}
+		}
+
 		// add / edit routine
 		foreach ($pos_events_list as $org_id => $pos_events) {
 			foreach ($pos_events as $raw_event) {
 				$result = null;
-			
-				// check if this event already exists in WP
-				// TO-DO: find way to reduce number of calls to this function
-				//		build array of existing events instead
-				$results = tribe_get_events(array('meta_key' => 'pos_guid', 'meta_value' => $raw_event->ID));
-			
+
 				// format the event to Tribe's standard
 				$formatted_event = self::format_event($raw_event);
-			
-				if (count($results)) {
-					$post_id = reset($results)->ID;
-				
+
+				if (isset($existing_events_tmp[$raw_event->ID])) {
+					$post_id = $existing_events_tmp[$raw_event->ID];
+
 					// TO-DO: compare event to existing to see if we need to update it
 					// also should we allow user to override event details in WP? Somehow track that they've manually changed it and avoid updating...
-				
+
 					// update the stored WP event with info from the POS
 					if ($dryrun !== true) {
 						$result = tribe_update_event($post_id, $formatted_event); // gives back either post_id or false
 					} else {
 						$result = 9900 + rand(1, 99);
 					}
-				
+
 					// if we got a post_id back, then it worked. log it with the others
 					if (is_numeric($result)) {
 						$sync_result['updated_count']++;
@@ -170,7 +179,7 @@ class GrindlessTribeEvents {
 					} else {
 						$result = 9900 + rand(1, 99);
 					}
-				
+
 					if (is_numeric($result)) {
 						$sync_result['added_count']++;
 						$sync_result['added'][] = $result;
@@ -180,8 +189,9 @@ class GrindlessTribeEvents {
 		}
 
 		// begin delete routine
-		
+
 		// format POS events array
+		$pos_events_tmp = array();
 		if (is_array($pos_events_list) && count($pos_events_list)) {
 			foreach ($pos_events_list as $org_id => $pos_events) {
 				foreach ($pos_events as $pos_event) {
@@ -190,29 +200,18 @@ class GrindlessTribeEvents {
 			}
 		}
 
-		// get a list of all events in our db (excludes custom events made in UI)
-		$existing_events = tribe_get_events(array('meta_key' => 'pos_guid'));
-		if (is_array($existing_events) && count($existing_events)) {
-			foreach ($existing_events as $existing_event) {
-				$event_guid = get_post_meta($existing_event->ID, 'pos_guid', true);
-				if (!is_string($event_guid) or !strlen($event_guid)) continue;
+		// delete events in our db that no longer exist server side
+		if (count($existing_events_tmp)) {
+			$pos_only_events = array_diff_key($existing_events_tmp, $pos_events_tmp);
 
-				$existing_events_tmp[$event_guid] = $existing_event->ID;
-			}
-
-			// delete events in our db that no longer exist server side
-			if (is_array($existing_events_tmp) && count($existing_events_tmp)) {
-				$pos_only_events = array_diff_key($existing_events_tmp, $pos_events_tmp);
-
-				foreach ($pos_only_events as $event_guid => $post_id) {
-					$delete_result = wp_delete_post($post_id, true); // true = skip the trash
-					if ($delete_result) {
-						$sync_result['deleted'][] = $delete_result->ID;
-						$sync_result['deleted_count']++;
-					}
+			foreach ($pos_only_events as $event_guid => $post_id) {
+				$delete_result = wp_delete_post($post_id, true); // true = skip the trash
+				if ($delete_result) {
+					$sync_result['deleted'][] = $delete_result->ID;
+					$sync_result['deleted_count']++;
 				}
 			}
-		}		
+		}
 
 		// end delete routine
 
